@@ -46,7 +46,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='YOLACT COCO Evaluation')
     parser.add_argument('--trained_model',
-                        default=None, type=str,
+                        default="weights/yolact_edge_youtubevis_resnet50_847_50000.pth", type=str,
                         help='Trained state_dict file path to open. If "interrupt", this will open the interrupt file.')
     parser.add_argument('--top_k', default=5, type=int,
                         help='Further restrict the number of predictions to parse')
@@ -106,7 +106,7 @@ def parse_args(argv=None):
                         help='Do not crop output masks with the predicted bounding box.')
     parser.add_argument('--image', default=None, type=str,
                         help='A path to an image to use for display.')
-    parser.add_argument('--images', default=None, type=str,
+    parser.add_argument('--images', default="data/test:results", type=str,
                         help='An input folder of images and output folder to save detected images. Should be in the format input->output.')
     parser.add_argument('--video', default=None, type=str,
                         help='A path to a video to evaluate on. Passing in a number will use that index webcam.')
@@ -128,7 +128,7 @@ def parse_args(argv=None):
                         help='Directory of images for TensorRT INT8 calibration, for explanation of this field, please refer to `calib_images` in `data/config.py`.')
     parser.add_argument('--trt_batch_size', default=1, type=int,
                         help='Maximum batch size to use during TRT conversion. This has to be greater than or equal to the batch size the model will take during inferece.')
-    parser.add_argument('--disable_tensorrt', default=False, dest='disable_tensorrt', action='store_true',
+    parser.add_argument('--disable_tensorrt', default=True, dest='disable_tensorrt', action='store_true',
                         help='Don\'t use TensorRT optimization when specified.')
     parser.add_argument('--use_fp16_tensorrt', default=False, dest='use_fp16_tensorrt', action='store_true',
                         help='This replaces all TensorRT INT8 optimization with FP16 optimization when specified.')
@@ -583,45 +583,55 @@ def badhash(x):
     x = (((x >> 16) ^ x) * 0x045d9f3b) & 0xFFFFFFFF
     x =  ((x >> 16) ^ x) & 0xFFFFFFFF
     return x
+def check_is_image_path(path):
+    surname = path.split(".")[-1]
+    img_surname = ["jpg","png"]
+    if surname.lower() in img_surname:
+        return True
+    else:
+        return False
 
 def evalimage(net:Yolact, path:str, save_path:str=None, detections:Detections=None, image_id=None):
-    frame = torch.from_numpy(cv2.imread(path)).cuda().float()
-    batch = FastBaseTransform()(frame.unsqueeze(0))
+    print("read : {}".format(path))
+    print(check_is_image_path(path))
+    if check_is_image_path(path):
+        frame = torch.from_numpy(cv2.imread(path)).cuda().float()
+        batch = FastBaseTransform()(frame.unsqueeze(0))
 
-    if cfg.flow.warp_mode != 'none':
-        assert False, "Evaluating the image with a video-based model. If you believe this is a problem, please report a issue at GitHub, thanks."
+        if cfg.flow.warp_mode != 'none':
+            assert False, "Evaluating the image with a video-based model. If you believe this is a problem, please report a issue at GitHub, thanks."
 
-    extras = {"backbone": "full", "interrupt": False, "keep_statistics": False, "moving_statistics": None}
+        extras = {"backbone": "full", "interrupt": False, "keep_statistics": False, "moving_statistics": None}
 
 
-    preds = net(batch, extras=extras)["pred_outs"]
+        preds = net(batch, extras=extras)["pred_outs"]
 
-    img_numpy = prep_display(preds, frame, None, None, undo_transform=False)
+        img_numpy = prep_display(preds, frame, None, None, undo_transform=False)
 
-    if args.output_coco_json:
-        with timer.env('Postprocess'):
-            _, _, h, w = batch.size()
-            classes, scores, boxes, masks = \
-                postprocess(preds, w, h, crop_masks=args.crop, score_threshold=args.score_threshold)
+        if args.output_coco_json:
+            with timer.env('Postprocess'):
+                _, _, h, w = batch.size()
+                classes, scores, boxes, masks = \
+                    postprocess(preds, w, h, crop_masks=args.crop, score_threshold=args.score_threshold)
 
-        with timer.env('JSON Output'):
-            boxes = boxes.cpu().numpy()
-            masks = masks.view(-1, h, w).cpu().numpy()
-            for i in range(masks.shape[0]):
-                # Make sure that the bounding box actually makes sense and a mask was produced
-                if (boxes[i, 3] - boxes[i, 1]) * (boxes[i, 2] - boxes[i, 0]) > 0:
-                    detections.add_bbox(image_id, classes[i], boxes[i,:],   scores[i])
-                    detections.add_mask(image_id, classes[i], masks[i,:,:], scores[i])
-    
-    if save_path is None:
-        img_numpy = img_numpy[:, :, (2, 1, 0)]
+            with timer.env('JSON Output'):
+                boxes = boxes.cpu().numpy()
+                masks = masks.view(-1, h, w).cpu().numpy()
+                for i in range(masks.shape[0]):
+                    # Make sure that the bounding box actually makes sense and a mask was produced
+                    if (boxes[i, 3] - boxes[i, 1]) * (boxes[i, 2] - boxes[i, 0]) > 0:
+                        detections.add_bbox(image_id, classes[i], boxes[i,:],   scores[i])
+                        detections.add_mask(image_id, classes[i], masks[i,:,:], scores[i])
 
-    if save_path is None:
-        plt.imshow(img_numpy)
-        plt.title(path)
-        plt.show()
-    else:
-        cv2.imwrite(save_path, img_numpy)
+        if save_path is None:
+            img_numpy = img_numpy[:, :, (2, 1, 0)]
+
+        if save_path is None:
+            plt.imshow(img_numpy)
+            plt.title(path)
+            plt.show()
+        else:
+            cv2.imwrite(save_path, img_numpy)
 
 def evalimages(net:Yolact, input_folder:str, output_folder:str, detections:Detections=None):
     if not os.path.exists(output_folder):
@@ -633,9 +643,9 @@ def evalimages(net:Yolact, input_folder:str, output_folder:str, detections:Detec
         name = os.path.basename(path)
         name = '.'.join(name.split('.')[:-1]) + '.png'
         out_path = os.path.join(output_folder, name)
-
-        evalimage(net, path, out_path, detections=detections, image_id=str(i))
-        print(path + ' -> ' + out_path)
+        if check_is_image_path(path):
+            evalimage(net, path, out_path, detections=detections, image_id=str(i))
+            print(path + ' -> ' + out_path)
 
     print('Done.')
 
@@ -1203,6 +1213,14 @@ def print_maps(all_maps):
 
 
 if __name__ == '__main__':
+
+    import cv2
+
+    try:
+        c = cv2.VideoCapture(2)
+    except:
+        print(        "Cam 2 is invalid.")
+
     parse_args()
 
     if args.config is not None:

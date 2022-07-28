@@ -11,17 +11,28 @@ from pycocotools import mask as maskUtils
 import random
 
 def get_label_map():
+    print("cfg",cfg)
+    try:
+        print("cfg.dataset.label_map",len(cfg.dataset.label_map.keys()),cfg.dataset.label_map)
+    except:
+        raise Exception(" find your setting dataset and check label.map")
+        raise Exception(" config.py")
+
     if cfg.dataset.label_map is None:
+        print("None")
         return {x+1: x+1 for x in range(len(cfg.dataset.class_names))}
     else:
-        return cfg.dataset.label_map 
+        print("Not None")
+        return cfg.dataset.label_map
 
 class COCOAnnotationTransform(object):
     """Transforms a COCO annotation into a Tensor of bbox coords and label index
     Initilized with a dictionary lookup of classnames to indexes
     """
-    def __init__(self):
+    def __init__(self, name_dataset = "COCO 2017"):
         self.label_map = get_label_map()
+        self.label_map = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: 11, 12: 12, 13: 13, 14: 14, 15: 15, 16: 16, 17: 17, 18: 18, 19: 19, 20: 20}
+        print("coco.py : COCOAnnotationTransform self.label_map", self.label_map)
 
     def __call__(self, target, width, height):
         """
@@ -39,7 +50,9 @@ class COCOAnnotationTransform(object):
                 bbox = obj['bbox']
                 label_idx = obj['category_id']
                 if label_idx >= 0:
+                    # print(label_idx)
                     label_idx = self.label_map[label_idx] - 1
+                    # print("after",label_idx)
                 final_box = list(np.array([bbox[0], bbox[1], bbox[0]+bbox[2], bbox[1]+bbox[3]])/scale)
                 final_box.append(label_idx)
                 res += [final_box]  # [xmin, ymin, xmax, ymax, label_idx]
@@ -75,6 +88,7 @@ class COCODetection(data.Dataset):
             self.ids = list(self.coco.imgs.keys())
         
         self.transform = transform
+        # target_transform = COCOAnnotationTransform(dataset_name)
         self.target_transform = target_transform
         
         self.name = dataset_name
