@@ -36,9 +36,9 @@ def str2bool(v):
 
 parser = argparse.ArgumentParser(
     description='Yolact Training Script')
-parser.add_argument('--batch_size', default=8, type=int,
+parser.add_argument('--batch_size', default=4, type=int,
                     help='Batch size for training')
-parser.add_argument('--resume', default=None, type=str,
+parser.add_argument('--resume', default="weights/yolact_edge_test.pth", type=str,
                     help='Checkpoint state_dict file to resume training from. If this is "interrupt"'\
                          ', the model will resume training from the interrupt file.')
 parser.add_argument('--start_iter', default=0, type=int,
@@ -78,7 +78,7 @@ parser.add_argument('--keep_latest', dest='keep_latest', action='store_true',
                     help='Only keep the latest checkpoint instead of each one.')
 parser.add_argument('--keep_latest_interval', default=100000, type=int,
                     help='When --keep_latest is on, don\'t delete the latest file at these intervals. This should be a multiple of save_interval or 0.')
-parser.add_argument('--dataset', default=None, type=str,
+parser.add_argument('--dataset', default="my_custom_dataset", type=str,
                     help='If specified, override the dataset specified in the config with this one (example: coco2017_dataset).')
 parser.add_argument('--yolact_transfer', dest='yolact_transfer', action='store_true',
                     help='Split pretrained FPN weights to two phase FPN (for models trained by YOLACT).')
@@ -100,6 +100,7 @@ if args.config is not None:
 if args.dataset is not None:
     set_dataset(args.dataset)
     cfg.num_classes = len(cfg.dataset.class_names) + 1  # FIXME: this could be better handled
+    print("cfg.num_classes",cfg.num_classes)
 
 
 # Update training parameters from the config if necessary
@@ -194,6 +195,7 @@ def train(rank, args):
                              transform=SSDAugmentationVideo(MEANS))
 
         if cfg.dataset.joint == 'coco':
+            print("coco")
             joint_dataset = COCODetection(image_path=cfg.joint_dataset.train_images,
                                           info_file=cfg.joint_dataset.train_info,
                                           transform=SSDAugmentation(MEANS))
@@ -214,9 +216,13 @@ def train(rank, args):
         collate_fn = collate_fn_flying_chairs
     
     else:
+        print("cfg.dataset",cfg.dataset)
+        print("cfg.dataset.name",cfg.dataset.name)
+        print("cfg.dataset.train_images",cfg.dataset.train_images)
+        print("cfg.dataset.train_info",cfg.dataset.train_info)
         dataset = COCODetection(image_path=cfg.dataset.train_images,
                                 info_file=cfg.dataset.train_info,
-                                transform=SSDAugmentation(MEANS))
+                                transform=SSDAugmentation(MEANS),dataset_name= cfg.dataset.name)
 
         if args.validation_epoch > 0:
             setup_eval()
@@ -438,6 +444,7 @@ def train(rank, args):
                     references = []
                     moving_statistics = {"aligned_feats": [], "conf_hist": []}
                     for idx, frame in enumerate(datum[:0:-1]):
+                        # print(len(frame[0]),len(frame[1]),len(frame))
                         images, annots = frame
 
                         extras = {"backbone": "full", "interrupt": True, "keep_statistics": True,
