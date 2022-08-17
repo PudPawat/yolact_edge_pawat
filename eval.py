@@ -106,7 +106,11 @@ def parse_args(argv=None):
                         help='Do not crop output masks with the predicted bounding box.')
     parser.add_argument('--image', default=None, type=str,
                         help='A path to an image to use for display.')
+<<<<<<< HEAD
+    parser.add_argument('--images', default=None, type=str,# "data/test:results"
+=======
     parser.add_argument('--images', default="data/test:results", type=str,
+>>>>>>> c4fabe78fd423410f68ef4fbb8ea2bea70e131a4
                         help='An input folder of images and output folder to save detected images. Should be in the format input->output.')
     parser.add_argument('--video', default=None, type=str,
                         help='A path to a video to evaluate on. Passing in a number will use that index webcam.')
@@ -114,7 +118,7 @@ def parse_args(argv=None):
                         help='The number of frames to evaluate in parallel to make videos play at higher fps.')
     parser.add_argument('--score_threshold', default=0, type=float,
                         help='Detections with a score under this threshold will not be considered. This currently only works in display mode.')
-    parser.add_argument('--dataset', default=None, type=str,
+    parser.add_argument('--dataset', default="my_custom_dataset1", type=str,
                         help='If specified, override the dataset specified in the config with this one (example: coco2017_dataset).')
     parser.add_argument('--detect', default=False, dest='detect', action='store_true',
                         help='Don\'t evauluate the mask branch at all and only do object detection. This only works for --display and --benchmark.')
