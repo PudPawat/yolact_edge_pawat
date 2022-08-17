@@ -10,7 +10,9 @@ weights/*
 __pycache__/
 *.py[cod]
 *$py.class
-
+*.mp4
+*.jpg
+*.png
 # C extensions
 *.so
 
