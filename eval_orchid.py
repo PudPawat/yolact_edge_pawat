@@ -31,6 +31,8 @@ import matplotlib.pyplot as plt
 import cv2
 import logging
 
+from copy import deepcopy
+
 import math
 
 
@@ -46,7 +48,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='YOLACT COCO Evaluation')
     parser.add_argument('--trained_model',
-                        default="weights/yolact_edge_5624_180000.pth", type=str,
+                        default="weights/yolact_edge_173_200000.pth", type=str,
                         help='Trained state_dict file path to open. If "interrupt", this will open the interrupt file.')
     parser.add_argument('--top_k', default=5, type=int,
                         help='Further restrict the number of predictions to parse')
@@ -209,6 +211,23 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
     if args.display_masks and cfg.eval_mask_branch:
         # After this, mask is of size [num_dets, h, w, 1]
         masks = masks[:num_dets_to_consider, :, :, None]
+        print("masks",masks.shape)
+        mask_imgs  = masks.cpu().numpy()
+        for i, mask in enumerate(mask_imgs):
+            mask = mask*255
+            try:
+                print("save: {}_{}_{}.jpg".format(str(img_name), i,
+                                                  str(20 * (int(cfg.dataset.class_names[classes[i]] + 1)))))
+                cv2.imwrite(
+                    "{}_{}_{}.jpg".format(str(img_name), i, str(20 * (int(cfg.dataset.class_names[classes[i]] + 1)))),
+                    mask)
+            except:
+                print("save: {}_{}_{}.jpg".format(str(img_name), i, str(20 * (int(classes[i] + 1)))))
+                cv2.imwrite("{}_{}_{}.jpg".format(str(img_name), i, str(20 * (int(classes[i] + 1)))), mask)
+
+            cv2.imshow("mask",mask)
+            cv2.waitKey(0)
+
         
         # Prepare the RGB images for each mask given their color (size [num_dets, h, w, 1])
         colors = torch.cat([get_color(j, on_gpu=img_gpu.device.index).view(1, 1, 1, 3) for j in range(num_dets_to_consider)], dim=0)
@@ -223,17 +242,7 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
         masks_color_summand = masks_color[0]
         if num_dets_to_consider > 1:
             inv_alph_cumul = inv_alph_masks[:(num_dets_to_consider-1)].cumprod(dim=0)
-            # print("inv_alph_cumul",inv_alph_cumul.shape,type(inv_alph_cumul))
-            # print("inv_alph_cumul",inv_alph_cumul.cpu().numpy().shape,inv_alph_cumul.cpu().numpy()[0].shape)
-            for i,img in enumerate(inv_alph_cumul.cpu().numpy()):
-                img = img*255
-                # ret,img = cv2.threshold(img,1,255,cv2.THRESH_BINARY)
-                ret,img = cv2.threshold(img,254,255,cv2.THRESH_BINARY_INV)
-                print("save: {}_{}_{}.jpg".format(str(img_name),cfg.dataset.class_names[classes[i]],i))
-                cv2.imwrite("{}_{}_{}.jpg".format(str(img_name),str(20*int(cfg.dataset.class_names[classes[i]])),i),img)
-                cv2.imwrite("{}_{}_{}.jpg".format(str(img_name),str(20*int(classes[i])),i),img)
-            # cv2.imshow("asd",np.asarray(inv_alph_cumul.cpu().numpy()[0]))
-            # cv2.waitKey(0)
+
             masks_color_cumul = masks_color[1:] * inv_alph_cumul
             # print("masks_color_cumul",masks_color_cumul.shape)
             masks_color_summand += masks_color_cumul.sum(dim=0)
@@ -248,7 +257,7 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
     cv2.imwrite("1.jpg",img_numpy)
     # cv2.imshow("asd", img_numpy)
 
-    cv2.waitKey(0)
+    # cv2.waitKey(0)
     if args.display_text or args.display_bboxes:
         for j in reversed(range(num_dets_to_consider)):
             x1, y1, x2, y2 = boxes[j, :]
