@@ -1,8 +1,13 @@
 # Byte-compiled / optimized / DLL files
+
+
 __pycache__/
 *.py[cod]
 *$py.class
-
+*.json
+*.png
+*.jpg
+data/*
 # C extensions
 *.so
 
@@ -157,3 +162,4 @@ data/FlyingChairs
 data/sbd
 data/video_files
 data/image_files
+data/calib_images

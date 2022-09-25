@@ -1,14 +1,15 @@
-from data import COCODetection, YoutubeVIS, get_label_map, MEANS, COLORS
-from yolact import Yolact
-from utils.augmentations import BaseTransform, BaseTransformVideo, FastBaseTransform, Resize
-from utils.functions import MovingAverage, ProgressBar
-from layers.box_utils import jaccard, center_size
-from utils import timer
-from utils.functions import SavePath
-from layers.output_utils import postprocess, undo_image_transformation
-import pycocotools
+from yolact_edge.data import COCODetection, YoutubeVIS, get_label_map, MEANS, COLORS
+from yolact_edge.data import cfg, set_cfg, set_dataset
+from yolact_edge.yolact import Yolact
+from yolact_edge.utils.augmentations import BaseTransform, BaseTransformVideo, FastBaseTransform, Resize
+from yolact_edge.utils.functions import MovingAverage, ProgressBar
+from yolact_edge.layers.box_utils import jaccard, center_size
+from yolact_edge.utils import timer
+from yolact_edge.utils.functions import SavePath
+from yolact_edge.layers.output_utils import postprocess, undo_image_transformation
+from yolact_edge.utils.tensorrt import convert_to_tensorrt
 
-from data import cfg, set_cfg, set_dataset
+import pycocotools
 
 import numpy as np
 import torch
@@ -32,7 +33,6 @@ import logging
 
 import math
 
-from utils.tensorrt import convert_to_tensorrt
 
 def str2bool(v):
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -46,7 +46,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='YOLACT COCO Evaluation')
     parser.add_argument('--trained_model',
-                        default=None, type=str,
+                        default="weights/yolact_edge_10_800000.pth", type=str,
                         help='Trained state_dict file path to open. If "interrupt", this will open the interrupt file.')
     parser.add_argument('--top_k', default=5, type=int,
                         help='Further restrict the number of predictions to parse')
@@ -106,7 +106,8 @@ def parse_args(argv=None):
                         help='Do not crop output masks with the predicted bounding box.')
     parser.add_argument('--image', default=None, type=str,
                         help='A path to an image to use for display.')
-    parser.add_argument('--images', default=None, type=str,
+    parser.add_argument('--images', default="data/test:results", type=str,
+
                         help='An input folder of images and output folder to save detected images. Should be in the format input->output.')
     parser.add_argument('--video', default=None, type=str,
                         help='A path to a video to evaluate on. Passing in a number will use that index webcam.')
@@ -114,7 +115,9 @@ def parse_args(argv=None):
                         help='The number of frames to evaluate in parallel to make videos play at higher fps.')
     parser.add_argument('--score_threshold', default=0, type=float,
                         help='Detections with a score under this threshold will not be considered. This currently only works in display mode.')
-    parser.add_argument('--dataset', default=None, type=str,
+
+    parser.add_argument('--dataset', default="my_custom_dataset", type=str,
+
                         help='If specified, override the dataset specified in the config with this one (example: coco2017_dataset).')
     parser.add_argument('--detect', default=False, dest='detect', action='store_true',
                         help='Don\'t evauluate the mask branch at all and only do object detection. This only works for --display and --benchmark.')
@@ -128,10 +131,12 @@ def parse_args(argv=None):
                         help='Directory of images for TensorRT INT8 calibration, for explanation of this field, please refer to `calib_images` in `data/config.py`.')
     parser.add_argument('--trt_batch_size', default=1, type=int,
                         help='Maximum batch size to use during TRT conversion. This has to be greater than or equal to the batch size the model will take during inferece.')
-    parser.add_argument('--disable_tensorrt', default=False, dest='disable_tensorrt', action='store_true',
+    parser.add_argument('--disable_tensorrt', default=True, dest='disable_tensorrt', action='store_true',
                         help='Don\'t use TensorRT optimization when specified.')
     parser.add_argument('--use_fp16_tensorrt', default=False, dest='use_fp16_tensorrt', action='store_true',
                         help='This replaces all TensorRT INT8 optimization with FP16 optimization when specified.')
+    parser.add_argument('--use_tensorrt_safe_mode', default=False, dest='use_tensorrt_safe_mode', action='store_true',
+                        help='This enables the safe mode that is a workaround for various TensorRT engine issues.')
 
     parser.set_defaults(no_bar=False, display=False, resume=False, output_coco_json=False, output_web_json=False, shuffle=False,
                         benchmark=False, no_sort=False, no_hash=False, mask_proto_debug=False, crop=True, detect=False)
@@ -316,7 +321,7 @@ class Detections:
             'segmentation': rle,
             'score': float(score)
         })
-    
+
     def dump(self):
         dump_arguments = [
             (self.bbox_data, args.bbox_det_file),
@@ -581,43 +586,70 @@ def badhash(x):
     x = (((x >> 16) ^ x) * 0x045d9f3b) & 0xFFFFFFFF
     x =  ((x >> 16) ^ x) & 0xFFFFFFFF
     return x
-
-def evalimage(net:Yolact, path:str, save_path:str=None):
-    frame = torch.from_numpy(cv2.imread(path)).cuda().float()
-    batch = FastBaseTransform()(frame.unsqueeze(0))
-
-    if cfg.flow.warp_mode != 'none':
-        assert False, "Evaluating the image with a video-based model. If you believe this is a problem, please report a issue at GitHub, thanks."
-
-    extras = {"backbone": "full", "interrupt": False, "keep_statistics": False, "moving_statistics": None}
-
-    preds = net(batch, extras=extras)["pred_outs"]
-
-    img_numpy = prep_display(preds, frame, None, None, undo_transform=False)
-    
-    if save_path is None:
-        img_numpy = img_numpy[:, :, (2, 1, 0)]
-
-    if save_path is None:
-        plt.imshow(img_numpy)
-        plt.title(path)
-        plt.show()
+def check_is_image_path(path):
+    surname = path.split(".")[-1]
+    img_surname = ["jpg","png"]
+    if surname.lower() in img_surname:
+        return True
     else:
-        cv2.imwrite(save_path, img_numpy)
+        return False
 
-def evalimages(net:Yolact, input_folder:str, output_folder:str):
+def evalimage(net:Yolact, path:str, save_path:str=None, detections:Detections=None, image_id=None):
+    print("read : {}".format(path))
+    print(check_is_image_path(path))
+    if check_is_image_path(path):
+        frame = torch.from_numpy(cv2.imread(path)).cuda().float()
+        batch = FastBaseTransform()(frame.unsqueeze(0))
+
+        if cfg.flow.warp_mode != 'none':
+            assert False, "Evaluating the image with a video-based model. If you believe this is a problem, please report a issue at GitHub, thanks."
+
+        extras = {"backbone": "full", "interrupt": False, "keep_statistics": False, "moving_statistics": None}
+
+
+        preds = net(batch, extras=extras)["pred_outs"]
+
+        img_numpy = prep_display(preds, frame, None, None, undo_transform=False)
+
+        if args.output_coco_json:
+            with timer.env('Postprocess'):
+                _, _, h, w = batch.size()
+                classes, scores, boxes, masks = \
+                    postprocess(preds, w, h, crop_masks=args.crop, score_threshold=args.score_threshold)
+
+            with timer.env('JSON Output'):
+                boxes = boxes.cpu().numpy()
+                masks = masks.view(-1, h, w).cpu().numpy()
+                for i in range(masks.shape[0]):
+                    # Make sure that the bounding box actually makes sense and a mask was produced
+                    if (boxes[i, 3] - boxes[i, 1]) * (boxes[i, 2] - boxes[i, 0]) > 0:
+                        detections.add_bbox(image_id, classes[i], boxes[i,:],   scores[i])
+                        detections.add_mask(image_id, classes[i], masks[i,:,:], scores[i])
+
+        if save_path is None:
+            img_numpy = img_numpy[:, :, (2, 1, 0)]
+
+        if save_path is None:
+            plt.imshow(img_numpy)
+            plt.title(path)
+            plt.show()
+        else:
+            cv2.imwrite(save_path, img_numpy)
+
+def evalimages(net:Yolact, input_folder:str, output_folder:str, detections:Detections=None):
     if not os.path.exists(output_folder):
         os.mkdir(output_folder)
 
     print()
-    for p in Path(input_folder).glob('*'): 
+    for i, p in enumerate(Path(input_folder).glob('*')):
         path = str(p)
         name = os.path.basename(path)
         name = '.'.join(name.split('.')[:-1]) + '.png'
         out_path = os.path.join(output_folder, name)
+        if check_is_image_path(path):
+            evalimage(net, path, out_path, detections=detections, image_id=str(i))
+            print(path + ' -> ' + out_path)
 
-        evalimage(net, path, out_path)
-        print(path + ' -> ' + out_path)
     print('Done.')
 
 from multiprocessing.pool import ThreadPool
@@ -875,16 +907,30 @@ def evaluate(net:Yolact, dataset, train_mode=False, train_cfg=None):
     net.detect.use_fast_nms = args.fast_nms
     cfg.mask_proto_debug = args.mask_proto_debug
 
+    detections = None
+    if args.output_coco_json and (args.image or args.images):
+        detections = Detections()
+        prep_coco_cats()
+
     if args.image is not None:
         if ':' in args.image:
             inp, out = args.image.split(':')
-            evalimage(net, inp, out)
+            evalimage(net, inp, out, detections=detections, image_id="0")
         else:
-            evalimage(net, args.image)
+            evalimage(net, args.image, detections=detections, image_id="0")
+
+        if args.output_coco_json:
+            detections.dump()
+
         return
+
     elif args.images is not None:
         inp, out = args.images.split(':')
-        evalimages(net, inp, out)
+        evalimages(net, inp, out, detections=detections)
+
+        if args.output_coco_json:
+            detections.dump()
+            
         return
     elif args.video is not None:
         if ':' in args.video:
@@ -893,6 +939,7 @@ def evaluate(net:Yolact, dataset, train_mode=False, train_cfg=None):
         else:
             evalvideo(net, args.video)
         return
+
 
     frame_times = MovingAverage(max_window_size=100000)
     dataset_size = len(dataset) if args.max_images < 0 else min(args.max_images, len(dataset))
@@ -1169,6 +1216,14 @@ def print_maps(all_maps):
 
 
 if __name__ == '__main__':
+
+    import cv2
+
+    try:
+        c = cv2.VideoCapture(2)
+    except:
+        print(        "Cam 2 is invalid.")
+
     parse_args()
 
     if args.config is not None:
@@ -1192,7 +1247,7 @@ if __name__ == '__main__':
     if args.dataset is not None:
         set_dataset(args.dataset)
 
-    from utils.logging_helper import setup_logger
+    from yolact_edge.utils.logging_helper import setup_logger
     setup_logger(logging_level=logging.INFO)
     logger = logging.getLogger("yolact.eval")
 

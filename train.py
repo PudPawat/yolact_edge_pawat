@@ -1,10 +1,10 @@
-from utils import timer
-from data import *
-from utils.augmentations import SSDAugmentation, SSDAugmentationVideo, BaseTransform, BaseTransformVideo
-from utils.functions import MovingAverage, SavePath
-from layers.modules import MultiBoxLoss
-from layers.modules.optical_flow_loss import OpticalFlowLoss
-from yolact import Yolact
+from yolact_edge.utils import timer
+from yolact_edge.data import *
+from yolact_edge.utils.augmentations import SSDAugmentation, SSDAugmentationVideo, BaseTransform, BaseTransformVideo
+from yolact_edge.utils.functions import MovingAverage, SavePath
+from yolact_edge.layers.modules import MultiBoxLoss
+from yolact_edge.layers.modules.optical_flow_loss import OpticalFlowLoss
+from yolact_edge.yolact import Yolact
 import os
 import sys
 import time
@@ -15,17 +15,17 @@ from torch.autograd import Variable
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import torch.backends.cudnn as cudnn
-import torch.nn.init as init
 import torch.utils.data as data
 import numpy as np
 import argparse
 import datetime
-from utils.tensorboard_helper import SummaryHelper
+from yolact_edge.utils.tensorboard_helper import SummaryHelper
+import yolact_edge.utils.misc as misc
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from utils.logging_helper import setup_logger
+from yolact_edge.utils.logging_helper import setup_logger
 import logging
+import random
 
 # Oof
 import eval as eval_script
@@ -36,19 +36,19 @@ def str2bool(v):
 
 parser = argparse.ArgumentParser(
     description='Yolact Training Script')
-parser.add_argument('--batch_size', default=8, type=int,
+parser.add_argument('--batch_size', default=2, type=int,
                     help='Batch size for training')
-parser.add_argument('--resume', default=None, type=str,
+parser.add_argument('--resume', default="weights/yolact_edge_10_800000.pth", type=str,
                     help='Checkpoint state_dict file to resume training from. If this is "interrupt"'\
                          ', the model will resume training from the interrupt file.')
-parser.add_argument('--start_iter', default=0, type=int,
+parser.add_argument('--start_iter', default=1, type=int,
                     help='Resume training at this iter. If this is -1, the iteration will be'\
                          'determined from the file name.')
 parser.add_argument('--random_seed', default=42, type=int,
                     help='Random seed used across all workers')
 parser.add_argument('--num_workers', default=4, type=int,
                     help='Number of workers used in dataloading')
-parser.add_argument('--num_gpus', default=None, type=int,
+parser.add_argument('--num_gpus', default=1, type=int,
                     help='Number of GPUs used in training')
 port = 2 ** 15 + 2 ** 14 + hash(os.getuid()) % 2 ** 14
 parser.add_argument("--dist_url", default="tcp://127.0.0.1:{}".format(port))
@@ -68,17 +68,17 @@ parser.add_argument('--log_folder', default='../../logs/',
                     help='Directory for saving Tensorboard logs')
 parser.add_argument('--config', default=None,
                     help='The config object to use.')
-parser.add_argument('--save_interval', default=10000, type=int,
+parser.add_argument('--save_interval', default=50000, type=int,
                     help='The number of iterations between saving the model.')
-parser.add_argument('--validation_size', default=5000, type=int,
+parser.add_argument('--validation_size', default=1000000, type=int,
                     help='The number of images to use for validation.')
-parser.add_argument('--validation_epoch', default=2, type=int,
+parser.add_argument('--validation_epoch', default=3, type=int,
                     help='Output validation information every n iterations. If -1, do no validation.')
 parser.add_argument('--keep_latest', dest='keep_latest', action='store_true',
                     help='Only keep the latest checkpoint instead of each one.')
 parser.add_argument('--keep_latest_interval', default=100000, type=int,
                     help='When --keep_latest is on, don\'t delete the latest file at these intervals. This should be a multiple of save_interval or 0.')
-parser.add_argument('--dataset', default=None, type=str,
+parser.add_argument('--dataset', default="my_custom_dataset", type=str,
                     help='If specified, override the dataset specified in the config with this one (example: coco2017_dataset).')
 parser.add_argument('--yolact_transfer', dest='yolact_transfer', action='store_true',
                     help='Split pretrained FPN weights to two phase FPN (for models trained by YOLACT).')
@@ -88,6 +88,8 @@ parser.add_argument('--drop_weights', default=None, type=str,
                     help='Drop specified weights (split by comma) from existing model.')
 parser.add_argument('--interrupt_no_save', dest='interrupt_no_save', action='store_true',
                     help='Just exit when keyboard interrupt occurs for testing.')
+parser.add_argument('--no_warmup_rescale', dest='warmup_rescale', action='store_false',
+                    help='Do not rescale warmup coefficients on multiple GPU training.')
 
 parser.set_defaults(keep_latest=False)
 args = parser.parse_args()
@@ -98,6 +100,7 @@ if args.config is not None:
 if args.dataset is not None:
     set_dataset(args.dataset)
     cfg.num_classes = len(cfg.dataset.class_names) + 1  # FIXME: this could be better handled
+    print("cfg.num_classes",cfg.num_classes)
 
 
 # Update training parameters from the config if necessary
@@ -124,43 +127,19 @@ else:
     torch.set_default_tensor_type('torch.FloatTensor')
 
 
-class ScatterWrapper:
-    """ Input is any number of lists. This will preserve them through a dataparallel scatter. """
-    def __init__(self, *args):
-        for arg in args:
-            if not isinstance(arg, list):
-                print('Warning: ScatterWrapper got input of non-list type.')
-        self.args = args
-        self.batch_size = len(args[0])
-    
-    def make_mask(self):
-        out = torch.Tensor(list(range(self.batch_size))).long()
-        if args.cuda: return out.cuda()
-        else: return out
-    
-    def get_args(self, mask):
-        device = mask.device
-        mask = [int(x) for x in mask]
-        out_args = [[] for _ in self.args]
-
-        for out, arg in zip(out_args, self.args):
-            for idx in mask:
-                x = arg[idx]
-                if isinstance(x, torch.Tensor):
-                    x = x.to(device)
-                out.append(x)
-        
-        return out_args
-
-
 def multi_gpu_rescale(args):
     # auto rescale parameters when GPU count > 1 or batch size is not 8
     scale_factor = args.num_gpus * args.batch_size // 8
     args.lr *= scale_factor
     global lr
     lr = args.lr
+
+    if args.warmup_rescale:
+        cfg.lr_warmup_init = 0
+        cfg.lr_warmup_until = 1000
+
     args.save_interval = args.save_interval // scale_factor
-    cfg.lr_warmup_init *= scale_factor
+    # cfg.lr_warmup_init *= scale_factor
     cfg.max_iter = cfg.max_iter // scale_factor
     cfg.lr_steps = tuple([lr_step // scale_factor for lr_step in cfg.lr_steps])
 
@@ -171,6 +150,12 @@ def train(rank, args):
     if rank == 0:
         if not os.path.exists(args.save_folder):
             os.mkdir(args.save_folder)
+
+    # fix the seed for reproducibility
+    seed = args.random_seed + rank
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
 
     # set up logger
     setup_logger(output=os.path.join(args.log_folder, cfg.name), distributed_rank=rank)
@@ -184,19 +169,20 @@ def train(rank, args):
         w.add_text("git_hash", repo.head.object.hexsha)
         logger.info("git hash: {}".format(repo.head.object.hexsha))
 
-    try:
-        logger.info("Initializing torch.distributed backend...")
-        dist.init_process_group(
-            backend='nccl',
-            init_method=args.dist_url,
-            world_size=args.num_gpus,
-            rank=rank
-        )
-    except Exception as e:
-        logger.error("Process group URL: {}".format(args.dist_url))
-        raise e
+    if args.num_gpus > 1:
+        try:
+            logger.info("Initializing torch.distributed backend...")
+            dist.init_process_group(
+                backend='nccl',
+                init_method=args.dist_url,
+                world_size=args.num_gpus,
+                rank=rank
+            )
+        except Exception as e:
+            logger.error("Process group URL: {}".format(args.dist_url))
+            raise e
 
-    dist.barrier()
+    misc.barrier()
 
     if torch.cuda.device_count() > 1:
         logger.info('Multiple GPUs detected! Turning off JIT.')
@@ -209,6 +195,7 @@ def train(rank, args):
                              transform=SSDAugmentationVideo(MEANS))
 
         if cfg.dataset.joint == 'coco':
+            print("coco")
             joint_dataset = COCODetection(image_path=cfg.joint_dataset.train_images,
                                           info_file=cfg.joint_dataset.train_info,
                                           transform=SSDAugmentation(MEANS))
@@ -229,9 +216,13 @@ def train(rank, args):
         collate_fn = collate_fn_flying_chairs
     
     else:
+        print("cfg.dataset",cfg.dataset)
+        print("cfg.dataset.name",cfg.dataset.name)
+        print("cfg.dataset.train_images",cfg.dataset.train_images)
+        print("cfg.dataset.train_info",cfg.dataset.train_info)
         dataset = COCODetection(image_path=cfg.dataset.train_images,
                                 info_file=cfg.dataset.train_info,
-                                transform=SSDAugmentation(MEANS))
+                                transform=SSDAugmentation(MEANS),dataset_name= cfg.dataset.name)
 
         if args.validation_epoch > 0:
             setup_eval()
@@ -281,21 +272,17 @@ def train(rank, args):
                                 negpos_ratio=3)
 
     if args.cuda:
-        cudnn.benchmark = True
         net.cuda(rank)
-        criterion.cuda(rank)
-        net = nn.parallel.DistributedDataParallel(net, device_ids=[rank], output_device=rank, broadcast_buffers=False,
-                                                  find_unused_parameters=True)
-        # net       = nn.DataParallel(net).cuda()
-        # criterion = nn.DataParallel(criterion).cuda()
+
+        if misc.is_distributed_initialized():
+            net = nn.parallel.DistributedDataParallel(net, device_ids=[rank], output_device=rank, broadcast_buffers=False,
+                                                      find_unused_parameters=True)
 
     optimizer = optim.SGD(filter(lambda x: x.requires_grad, net.parameters()),
                           lr=args.lr, momentum=args.momentum,
                           weight_decay=args.decay)
 
     # loss counters
-    loc_loss = 0
-    conf_loss = 0
     iteration = max(args.start_iter, 0)
     w.set_step(iteration)
     last_time = time.time()
@@ -306,7 +293,7 @@ def train(rank, args):
     # Which learning rate adjustment step are we on? lr' = lr * gamma ^ step_index
     step_index = 0
 
-    from data.sampler_utils import InfiniteSampler, build_batch_data_sampler
+    from yolact_edge.data.sampler_utils import InfiniteSampler, build_batch_data_sampler
 
     infinite_sampler = InfiniteSampler(dataset, seed=args.random_seed, num_replicas=args.num_gpus,
                                        rank=rank, shuffle=True)
@@ -330,8 +317,6 @@ def train(rank, args):
                                             batch_sampler=joint_train_sampler)
         joint_data_loader_iter = iter(joint_data_loader)
 
-    dist.barrier()
-    
     save_path = lambda epoch, iteration: SavePath(cfg.name, epoch, iteration).get_path(root=args.save_folder)
     time_avg = MovingAverage()
     data_time_avg = MovingAverage(10)
@@ -343,8 +328,7 @@ def train(rank, args):
         optimizer.zero_grad()
 
         out = net_outs["pred_outs"]
-        wrapper = ScatterWrapper(targets, masks, num_crowds)
-        losses = criterion(out, wrapper, wrapper.make_mask())
+        losses = criterion(out, targets, masks, num_crowds)
 
         losses = {k: v.mean() for k, v in losses.items()}  # Mean here because Dataparallel
 
@@ -377,7 +361,6 @@ def train(rank, args):
             while True:
                 data_start_time = time.perf_counter()
                 datum = next(data_loader_iter)
-                dist.barrier()
                 data_end_time = time.perf_counter()
                 data_time = data_end_time - data_start_time
                 if iteration != args.start_iter:
@@ -444,7 +427,6 @@ def train(rank, args):
                 elif cfg.dataset.joint or not cfg.dataset.is_video:
                     if cfg.dataset.joint:
                         joint_datum = next(joint_data_loader_iter)
-                        dist.barrier()
                         # Load training data
                         # Note, for training on multiple gpus this will use the custom replicate and gather I wrote up there
                         images, targets, masks, num_crowds = prepare_data(joint_datum)
@@ -453,25 +435,8 @@ def train(rank, args):
                     extras = {"backbone": "full", "interrupt": False,
                               "moving_statistics": {"aligned_feats": []}}
                     net_outs = net(images,extras=extras)
-                    out = net_outs["pred_outs"]
-                    # Compute Loss
-                    optimizer.zero_grad()
-
-                    wrapper = ScatterWrapper(targets, masks, num_crowds)
-                    losses = criterion(out, wrapper, wrapper.make_mask())
-
-                    losses = { k: v.mean() for k,v in losses.items() } # Mean here because Dataparallel
-                    loss = sum([losses[k] for k in losses])
-
-                    # Backprop
-                    loss.backward() # Do this to free up vram even if loss is not finite
-                    if torch.isfinite(loss).item():
-                        optimizer.step()
-
-                    # Add the loss to the moving average for bookkeeping
-                    for k in losses:
-                        loss_avgs[k].add(losses[k].item())
-                        w.add_scalar('joint/%s' % k, losses[k].item())
+                    run_name = "joint" if cfg.dataset.joint else "compute"
+                    losses = backward_and_log(run_name, net_outs, targets, masks, num_crowds)
 
                 # Forward Pass
                 if cfg.dataset.is_video:
@@ -479,6 +444,7 @@ def train(rank, args):
                     references = []
                     moving_statistics = {"aligned_feats": [], "conf_hist": []}
                     for idx, frame in enumerate(datum[:0:-1]):
+                        # print(len(frame[0]),len(frame[1]),len(frame))
                         images, annots = frame
 
                         extras = {"backbone": "full", "interrupt": True, "keep_statistics": True,
@@ -558,7 +524,7 @@ time: {time}  data_time: {data_time}  lr: {lr}  {memory}\
                     
                     if cfg.flow.train_flow:
                         import flowiz as fz
-                        from layers.warp_utils import deform_op
+                        from yolact_edge.layers.warp_utils import deform_op
                         tgt_size = (64, 64)
                         flow_size = flows.size()[2:]
                         vis_data = []
@@ -634,15 +600,18 @@ time: {time}  data_time: {data_time}  lr: {lr}  {memory}\
                         if args.keep_latest_interval <= 0 or iteration % args.keep_latest_interval != args.save_interval:
                             logger.info('Deleting old save...')
                             os.remove(latest)
-            
+
+            misc.barrier()
+
             # This is done per epoch
             if args.validation_epoch > 0:
                 if epoch % args.validation_epoch == 0 and epoch > 0:
                     if rank == 0:
                         compute_validation_map(yolact_net, val_dataset)
-                    dist.barrier()
+                    misc.barrier()
 
     except KeyboardInterrupt:
+        misc.barrier()
         if args.interrupt_no_save:
             logger.info('No save on interrupt, just exiting...')
         elif rank == 0:
@@ -705,8 +674,7 @@ def compute_validation_loss(net, data_loader, criterion):
             images, targets, masks, num_crowds = prepare_data(datum)
             out = net(images)
 
-            wrapper = ScatterWrapper(targets, masks, num_crowds)
-            _losses = criterion(out, wrapper, wrapper.make_mask())
+            _losses = criterion(out, targets, masks, num_crowds)
             
             for k, v in _losses.items():
                 v = v.mean().item()
