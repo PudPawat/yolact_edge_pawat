@@ -265,17 +265,17 @@ my_custom_dataset1 = dataset_base.copy({
 my_custom_dataset = dataset_base.copy({
     'name': 'Orchid angle',
 
-    'train_images': './data/Send_pawat/IMG/train',
-    'train_info':   './data/Send_pawat/annotations/cocoformat_train.json',
+    'train_images': './data/test_yolact/IMG1/train',
+    'train_info':   './data/test_yolact/annotations/cocoformat_train1.json',
 
-    'valid_images': './data/Send_pawat/IMG/train',
-    'valid_info':   './data/Send_pawat/annotations/cocoformat_train.json',
+    'valid_images': './data/test_yolact/IMG1/train',
+    'valid_info':   './data/test_yolact/annotations/cocoformat_train1.json',
 
     'has_gt': True,
-    'class_names': ('0','1', '2', '3','4','5','6', '7', '8','9','10','11', '12', '13','14','15','16', '17', '18','19','20','21'),
+    'class_names': ('0','1', '2', '3','4','5','6', '7', '8','9','10','11', '12', '13','14','15','16', '17', '18','19','20'),
     # 'class_names': {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5,"6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11, "12": 12, "13": 13, "14": 14, "15": 15, "16": 16, "17": 17, "18": 18, "19": 19, "20": 20},
     # 'label_map': {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5,"6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11, "12": 12, "13": 13, "14": 14, "15": 15, "16": 16, "17": 17, "18": 18, "19": 19, "20": 20},
-    'label_map': {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: 11, 12: 12, 13: 13, 14: 14, 15: 15, 16: 16, 17: 17, 18: 18, 19: 19, 20: 20,21:21},
+    'label_map': {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: 11, 12: 12, 13: 13, 14: 14, 15: 15, 16: 16, 17: 17, 18: 18, 19: 19, 20: 20},
 
     # below is only needed for YTVIS-style video dataset.
 

@@ -36,9 +36,9 @@ def str2bool(v):
 
 parser = argparse.ArgumentParser(
     description='Yolact Training Script')
-parser.add_argument('--batch_size', default=2, type=int,
+parser.add_argument('--batch_size', default=4, type=int,
                     help='Batch size for training')
-parser.add_argument('--resume', default="weights/yolact_edge_10_800000.pth", type=str,
+parser.add_argument('--resume', default="weights/yolact_edge_test.pth", type=str,
                     help='Checkpoint state_dict file to resume training from. If this is "interrupt"'\
                          ', the model will resume training from the interrupt file.')
 parser.add_argument('--start_iter', default=1, type=int,
