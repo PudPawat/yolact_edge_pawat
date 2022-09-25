@@ -107,7 +107,6 @@ def parse_args(argv=None):
     parser.add_argument('--image', default=None, type=str,
                         help='A path to an image to use for display.')
     parser.add_argument('--images', default="data/test:results", type=str,
-
                         help='An input folder of images and output folder to save detected images. Should be in the format input->output.')
     parser.add_argument('--video', default=None, type=str,
                         help='A path to a video to evaluate on. Passing in a number will use that index webcam.')
